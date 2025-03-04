@@ -1,5 +1,6 @@
 package net.arkaine;
 
+import com.google.gson.*;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.geometry.Insets;
@@ -9,13 +10,10 @@ import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 import okhttp3.*;
 
-import com.google.gson.Gson;
-import com.google.gson.JsonObject;
 import com.google.gson.reflect.TypeToken;
 
 import java.io.IOException;
 import java.lang.reflect.Type;
-import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -23,7 +21,7 @@ public class GPT4AllChatApp extends Application {
     private static final String API_URL = "http://localhost:4891/v1/chat/completions";
     private static final String API_MODELS_URL = "http://localhost:4891/v1/models";
     private static final OkHttpClient client = new OkHttpClient();
-    private static final Gson gson = new Gson();
+    private static final Gson gson = new GsonBuilder().setPrettyPrinting().create();
 
     private ComboBox<String> modelComboBox;
 
@@ -38,7 +36,13 @@ public class GPT4AllChatApp extends Application {
         TextArea responseArea = new TextArea();
         responseArea.setEditable(false);
         responseArea.setWrapText(true);
-        responseArea.setPrefHeight(300);
+        responseArea.setPrefHeight(200);
+
+        TextArea rawResponseArea = new TextArea();
+        rawResponseArea.setEditable(false);
+        rawResponseArea.setWrapText(true);
+        rawResponseArea.setPrefHeight(200);
+        rawResponseArea.setPromptText("Réponse HTTP brute apparaîtra ici");
 
         // Combo box pour les modèles
         modelComboBox = new ComboBox<>();
@@ -54,7 +58,7 @@ public class GPT4AllChatApp extends Application {
                 showAlert("Erreur", "Veuillez sélectionner un modèle.");
                 return;
             }
-            sendPrompt(inputArea, responseArea, modelComboBox.getValue());
+            sendPrompt(inputArea, responseArea, rawResponseArea, modelComboBox.getValue());
         });
 
         // Layout
@@ -67,11 +71,13 @@ public class GPT4AllChatApp extends Application {
                 inputArea,
                 sendButton,
                 new Label("Réponse:"),
-                responseArea
+                responseArea,
+                new Label("Réponse HTTP Brute:"),
+                rawResponseArea
         );
 
         // Scène
-        Scene scene = new Scene(layout, 500, 700);
+        Scene scene = new Scene(layout, 500, 900);
         primaryStage.setTitle("GPT4All Chat");
         primaryStage.setScene(scene);
         primaryStage.show();
@@ -130,8 +136,7 @@ public class GPT4AllChatApp extends Application {
             }
         });
     }
-
-    private void sendPrompt(TextArea inputArea, TextArea responseArea, String selectedModel) {
+    private void sendPrompt(TextArea inputArea, TextArea responseArea, TextArea rawResponseArea, String selectedModel) {
         String prompt = inputArea.getText().trim();
         if (prompt.isEmpty()) {
             showAlert("Erreur", "Veuillez entrer un prompt.");
@@ -142,6 +147,7 @@ public class GPT4AllChatApp extends Application {
         Button sendButton = (Button) inputArea.getScene().lookup(".button");
         sendButton.setDisable(true);
         responseArea.setText("Chargement...");
+        rawResponseArea.clear();
 
         // Préparer la requête
         JsonObject requestBody = new JsonObject();
@@ -165,6 +171,7 @@ public class GPT4AllChatApp extends Application {
             public void onFailure(Call call, IOException e) {
                 Platform.runLater(() -> {
                     responseArea.setText("Erreur de connexion : " + e.getMessage());
+                    rawResponseArea.setText("Erreur de connexion : " + e.getMessage());
                     sendButton.setDisable(false);
                 });
             }
@@ -173,13 +180,47 @@ public class GPT4AllChatApp extends Application {
             public void onResponse(Call call, Response response) throws IOException {
                 Platform.runLater(() -> {
                     try {
+                        // Récupérer le corps de la réponse
+                        String responseBody = response.body().string();
+
+                        // Afficher les détails bruts de la réponse
+                        StringBuilder rawResponse = new StringBuilder();
+                        rawResponse.append("Code HTTP: ").append(response.code()).append("\n");
+                        rawResponse.append("Message: ").append(response.message()).append("\n");
+                        rawResponse.append("Headers:\n");
+                        for (String name : response.headers().names()) {
+                            rawResponse.append(name).append(": ").append(response.headers().get(name)).append("\n");
+                        }
+                        rawResponse.append("\nCorps de la réponse:\n");
+
+                        // Analyse du corps de la réponse
+                        try {
+                            JsonObject jsonResponse = JsonParser.parseString(responseBody).getAsJsonObject();
+                            rawResponse.append(gson.toJson(jsonResponse));
+
+                            // Extraction de toutes les lignes de réponse
+                            JsonArray choices = jsonResponse.getAsJsonArray("choices");
+                            rawResponse.append("\n\nLignes de réponse complètes:\n");
+                            for (int i = 0; i < choices.size(); i++) {
+                                JsonObject choice = choices.get(i).getAsJsonObject();
+                                JsonObject message = choice.getAsJsonObject("message");
+
+                                rawResponse.append("Ligne ").append(i + 1).append(":\n");
+                                rawResponse.append("Role: ").append(message.get("role")).append("\n");
+                                rawResponse.append("Contenu: ").append(message.get("content")).append("\n\n");
+                            }
+                        } catch (Exception e) {
+                            rawResponse.append("Impossible de parser le JSON : ").append(responseBody);
+                        }
+
+                        rawResponseArea.setText(rawResponse.toString());
+
                         if (!response.isSuccessful()) {
                             responseArea.setText("Erreur : " + response.code() + " " + response.message());
                             return;
                         }
 
-                        // Parser la réponse
-                        String responseBody = response.body().string();
+                        // Parser la réponse pour l'affichage principal
                         JsonObject jsonResponse = gson.fromJson(responseBody, JsonObject.class);
                         String assistantResponse = jsonResponse
                                 .getAsJsonArray("choices")
@@ -192,6 +233,8 @@ public class GPT4AllChatApp extends Application {
                         responseArea.setText(assistantResponse);
                     } catch (Exception e) {
                         responseArea.setText("Erreur de traitement : " + e.getMessage());
+                        rawResponseArea.setText("Erreur de traitement : " + e.getMessage() +
+                                "\n\nDétails de l'erreur:\n" + e.toString());
                     } finally {
                         sendButton.setDisable(false);
                     }
